@@ -1,44 +1,23 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import 'package:runanywhere/runanywhere.dart';
-import 'package:runanywhere_llamacpp/runanywhere_llamacpp.dart';
-import 'package:runanywhere_onnx/runanywhere_onnx.dart';
+import 'screens/home_screen.dart';
 
-import 'services/model_service.dart';
-import 'theme/app_theme.dart';
-import 'views/home_view.dart';
-
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-
-  // Initialize the RunAnywhere SDK
-  await RunAnywhere.initialize();
-
-  // Register backends
-  await LlamaCpp.register();
-  await Onnx.register();
-
-  // Register models
-  ModelService.registerDefaultModels();
-
-  runApp(
-    ChangeNotifierProvider(
-      create: (_) => ModelService(),
-      child: const RunAnywhereStarterApp(),
-    ),
-  );
+  runApp(const SafeShareApp());
 }
 
-class RunAnywhereStarterApp extends StatelessWidget {
-  const RunAnywhereStarterApp({super.key});
+class SafeShareApp extends StatelessWidget {
+  const SafeShareApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'RunAnywhere Starter',
+      title: 'SafeShare',
       debugShowCheckedModeBanner: false,
-      theme: AppTheme.darkTheme,
-      home: const HomeView(),
+      theme: ThemeData.dark().copyWith(
+        colorScheme: ColorScheme.dark(primary: const Color(0xFF9333EA)),
+      ),
+      home: const HomeScreen(),
     );
   }
 }
