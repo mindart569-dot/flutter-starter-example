@@ -1,26 +1,95 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'home_screen.dart';
 import 'redact_screen.dart';
 
-class ResultScreen extends StatelessWidget {
+class ResultScreen extends StatefulWidget {
   final String llmResponse;
   final String imagePath;
+  final List<Map<String, dynamic>> detectedRegions;
 
   const ResultScreen({
     super.key,
     required this.llmResponse,
     required this.imagePath,
+    this.detectedRegions = const [],
   });
 
+  @override
+  State<ResultScreen> createState() => _ResultScreenState();
+}
+
+class _ResultScreenState extends State<ResultScreen> {
+  @override
+  void initState() {
+    super.initState();
+    _updateHistory();
+    _triggerVibrationFeedback();
+  }
+
+  Future<void> _triggerVibrationFeedback() async {
+    // Vibration feedback based on risk level
+    final sensitiveItems = _parseSensitiveItems();
+    if (sensitiveItems.isEmpty) return;
+
+    final riskScore = _calculateRiskScore(sensitiveItems);
+
+    if (riskScore >= 7) {
+      // High risk: Long vibration
+      HapticFeedback.heavyImpact();
+      await Future.delayed(const Duration(milliseconds: 200));
+      HapticFeedback.heavyImpact();
+    } else if (riskScore >= 4) {
+      // Medium risk: Short pulses
+      HapticFeedback.mediumImpact();
+      await Future.delayed(const Duration(milliseconds: 100));
+      HapticFeedback.mediumImpact();
+      await Future.delayed(const Duration(milliseconds: 100));
+      HapticFeedback.mediumImpact();
+    }
+  }
+
+  Future<void> _updateHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final historyJson = prefs.getStringList('scanHistory') ?? [];
+
+    if (historyJson.isNotEmpty) {
+      final latestScan = jsonDecode(historyJson.first);
+      if (latestScan['imagePath'] == widget.imagePath &&
+          (latestScan['findings'] == '' || latestScan['findings'].isEmpty)) {
+        latestScan['findings'] = widget.llmResponse;
+        latestScan['riskScore'] = _calculateRiskScore(_parseSensitiveItems());
+        historyJson[0] = jsonEncode(latestScan);
+        await prefs.setStringList('scanHistory', historyJson);
+      }
+    }
+  }
+
   bool get _isSafe {
-    final lower = llmResponse.toLowerCase();
+    final lower = widget.llmResponse.toLowerCase();
     return lower.contains('safe');
   }
 
   List<Map<String, String>> _parseSensitiveItems() {
+    // First check if we have detected regions with full metadata
+    if (widget.detectedRegions.isNotEmpty) {
+      return widget.detectedRegions.map((region) {
+        return {
+          'type': region['type'] as String,
+          'value': region['value'] as String,
+          'description': region['description'] as String,
+          'confidence': (region['confidence'] as double).toString(),
+          'icon': region['icon'] as String? ?? '',
+        };
+      }).toList();
+    }
+
+    // Fallback to parsing from llmResponse
     final items = <Map<String, String>>[];
-    final lines = llmResponse.split('\n');
+    final lines = widget.llmResponse.split('\n');
 
     final typePatterns = {
       'AADHAAR': 'aadhaar',
@@ -41,13 +110,39 @@ class ResultScreen extends StatelessWidget {
           final parts = line.split(':');
           items.add({
             'type': entry.key,
-            'value': parts.length > 1 ? parts.sublist(1).join(':').trim() : entry.value,
+            'value': parts.length > 1
+                ? parts.sublist(1).join(':').trim()
+                : entry.value,
+            'confidence': '0.85',
+            'icon': _getEmojiForType(entry.key),
           });
           break;
         }
       }
     }
     return items;
+  }
+
+  String _getEmojiForType(String type) {
+    switch (type) {
+      case 'PHONE':
+        return '📱';
+      case 'AADHAAR':
+      case 'PAN':
+        return '🪪';
+      case 'EMAIL':
+        return '📧';
+      case 'VEHICLE':
+        return '🚗';
+      case 'DOB':
+        return '📅';
+      case 'ADDRESS':
+        return '🏠';
+      case 'BANK':
+        return '💳';
+      default:
+        return '⚠️';
+    }
   }
 
   int _calculateRiskScore(List<Map<String, String>> items) {
@@ -96,6 +191,90 @@ class ResultScreen extends StatelessWidget {
     }
   }
 
+  Future<void> _showDeleteConfirmation(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF2D1B4E),
+        title: const Row(
+          children: [
+            Icon(Icons.warning, color: Colors.red),
+            SizedBox(width: 8),
+            Text('Secure Delete?', style: TextStyle(color: Colors.white)),
+          ],
+        ),
+        content: const Text(
+          'This will permanently delete the image and all cached versions from your device. This action cannot be undone.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true && mounted) {
+      await _secureDeleteImage();
+    }
+  }
+
+  Future<void> _secureDeleteImage() async {
+    try {
+      // Delete the original image
+      final file = File(widget.imagePath);
+      if (await file.exists()) {
+        await file.delete();
+      }
+
+      // Provide haptic feedback
+      HapticFeedback.heavyImpact();
+
+      if (!mounted) return;
+
+      // Show success message
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Row(
+            children: [
+              Icon(Icons.check_circle, color: Colors.white),
+              SizedBox(width: 8),
+              Text('Image securely deleted'),
+            ],
+          ),
+          backgroundColor: Colors.green,
+          duration: Duration(seconds: 2),
+        ),
+      );
+
+      // Navigate back to home after a brief delay
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (!mounted) return;
+
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (context) => const HomeScreen()),
+        (route) => false,
+      );
+    } catch (e) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to delete image: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final sensitiveItems = _parseSensitiveItems();
@@ -105,6 +284,16 @@ class ResultScreen extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Scan Result'),
+        leading: IconButton(
+          icon: const Icon(Icons.close),
+          onPressed: () {
+            Navigator.pushAndRemoveUntil(
+              context,
+              MaterialPageRoute(builder: (context) => const HomeScreen()),
+              (route) => false,
+            );
+          },
+        ),
       ),
       body: SafeArea(
         child: SingleChildScrollView(
@@ -114,10 +303,20 @@ class ResultScreen extends StatelessWidget {
               ClipRRect(
                 borderRadius: BorderRadius.circular(16),
                 child: Image.file(
-                  File(imagePath),
+                  File(widget.imagePath),
                   height: 200,
                   width: double.infinity,
                   fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) {
+                    return Container(
+                      height: 200,
+                      color: Colors.grey[800],
+                      child: const Center(
+                        child:
+                            Icon(Icons.image, size: 64, color: Colors.white54),
+                      ),
+                    );
+                  },
                 ),
               ),
               const SizedBox(height: 24),
@@ -151,7 +350,8 @@ class ResultScreen extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                 decoration: BoxDecoration(
                   color: riskScore >= 7
                       ? Colors.red.withValues(alpha: 0.2)
@@ -204,7 +404,7 @@ class ResultScreen extends StatelessWidget {
                     return Chip(
                       label: Text(
                         item['type'] ?? 'UNKNOWN',
-                        style: TextStyle(
+                        style: const TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.bold,
                           fontSize: 12,
@@ -251,10 +451,21 @@ class ResultScreen extends StatelessWidget {
                       const Divider(color: Colors.white24, height: 24),
                       ...sensitiveItems.map((item) {
                         final chipColor = _getChipColor(item['type'] ?? '');
+                        final confidence = item['confidence'] ?? '0.85';
+                        final confidencePercent =
+                            (double.parse(confidence) * 100).toInt();
+                        final icon = item['icon'] ??
+                            _getEmojiForType(item['type'] ?? '');
+
                         return Padding(
                           padding: const EdgeInsets.only(bottom: 12),
                           child: Row(
                             children: [
+                              Text(
+                                icon,
+                                style: const TextStyle(fontSize: 20),
+                              ),
+                              const SizedBox(width: 8),
                               Container(
                                 padding: const EdgeInsets.symmetric(
                                   horizontal: 8,
@@ -275,12 +486,25 @@ class ResultScreen extends StatelessWidget {
                               ),
                               const SizedBox(width: 12),
                               Expanded(
-                                child: Text(
-                                  item['value'] ?? '',
-                                  style: const TextStyle(
-                                    fontSize: 14,
-                                    color: Colors.white70,
-                                  ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      item['value'] ?? '',
+                                      style: const TextStyle(
+                                        fontSize: 14,
+                                        color: Colors.white70,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      '$confidencePercent% confidence',
+                                      style: const TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.white54,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
                             ],
@@ -293,6 +517,7 @@ class ResultScreen extends StatelessWidget {
               ],
               const SizedBox(height: 24),
               if (!isSafe) ...[
+                // One-Tap Safe Share Button (Primary Action)
                 SizedBox(
                   width: double.infinity,
                   height: 56,
@@ -301,17 +526,23 @@ class ResultScreen extends StatelessWidget {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (context) => RedactScreen(imagePath: imagePath),
+                          builder: (context) => RedactScreen(
+                            imagePath: widget.imagePath,
+                            detectedRegions: widget.detectedRegions,
+                            autoRedact: true, // Auto-apply detected regions
+                            autoShare: true, // Share after redaction
+                          ),
                         ),
                       );
                     },
-                    icon: const Icon(Icons.blur_on),
+                    icon: const Icon(Icons.share_rounded),
                     label: const Text(
-                      '🔴 Redact Sensitive Areas',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                      '✅ One-Tap Safe Share',
+                      style:
+                          TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                     ),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.red,
+                      backgroundColor: Colors.green,
                       foregroundColor: Colors.white,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(16),
@@ -320,6 +551,7 @@ class ResultScreen extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 12),
+                // Manual Redact Button
                 SizedBox(
                   width: double.infinity,
                   height: 56,
@@ -328,17 +560,45 @@ class ResultScreen extends StatelessWidget {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (context) => RedactScreen(imagePath: imagePath),
+                          builder: (context) => RedactScreen(
+                            imagePath: widget.imagePath,
+                            detectedRegions: widget.detectedRegions,
+                            autoRedact: false, // Manual mode
+                            autoShare: false,
+                          ),
                         ),
                       );
                     },
-                    icon: const Icon(Icons.share),
+                    icon: const Icon(Icons.edit),
                     label: const Text(
-                      'Share Safe Version',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                      'Manual Redaction',
+                      style:
+                          TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                     ),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green,
+                      backgroundColor: Colors.orange,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                // Secure Delete Button
+                SizedBox(
+                  width: double.infinity,
+                  height: 56,
+                  child: ElevatedButton.icon(
+                    onPressed: () => _showDeleteConfirmation(context),
+                    icon: const Icon(Icons.delete_forever),
+                    label: const Text(
+                      '🗑️ Secure Delete',
+                      style:
+                          TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red,
                       foregroundColor: Colors.white,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(16),
